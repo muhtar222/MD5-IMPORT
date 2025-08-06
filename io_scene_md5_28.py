@@ -489,22 +489,47 @@ def define_components(obj, bm, bones, correctionMatrix):
     weightGroupIndexes = [vg.index for vg in allVertGroups if vg.name in boneNames]
     uvData = bm.loops.layers.uv.active
     weightData = bm.verts.layers.deform.active
+    
+    # Check if UV layer exists
+    if not uvData:
+        print(f"Warning: No UV layer found for {obj.name}")
+        return ([], [], [])
+    
     tris = [[f.index, f.verts[2].index, f.verts[1].index, f.verts[0].index]
         for f in bm.faces] # reverse vert order to flip normal
     verts = []
     weights = []
     wtIndex = 0
     firstWt = 0
+    
     for vert in bm.verts:
+        # Skip vertices that don't have face connections or are wire vertices
+        if not vert.link_loops or vert.is_wire:
+            print(f"Skipping vertex {vert.index}: no face connections")
+            continue
+            
         vGroupDict = vert[weightData]
         wtDict = dict([(k, vGroupDict[k]) for k in vGroupDict.keys()
             if k in weightGroupIndexes])
-        u = vert.link_loops[0][uvData].uv.x
-        v = 1 - vert.link_loops[0][uvData].uv.y # MD5 wants it flipped
+        
+        # Safe UV access with validation
+        try:
+            loop = vert.link_loops[0]
+            u = loop[uvData].uv.x
+            v = 1 - loop[uvData].uv.y # MD5 wants it flipped
+        except (IndexError, KeyError, AttributeError):
+            u, v = 0.0, 0.0  # Default fallback
+            print(f"UV access failed for vertex {vert.index}, using default (0,0)")
+        
         numWts = len(wtDict.keys())
+        if numWts == 0:
+            print(f"Skipping vertex {vert.index}: no weights")
+            continue
+            
         verts.append([vert.index, u, v, firstWt, numWts])
         wtScaleFactor = 1.0 / sum(wtDict.values())
         firstWt += numWts
+        
         for vGroup in wtDict:
             bone = [b for b in bones
                 if b.name == allVertGroups[vGroup].name][0]
@@ -718,15 +743,24 @@ def write_md5anim(filePath, prerequisites, correctionMatrix, previewKeys, frame_
             depsgraph = bpy.context.evaluated_depsgraph_get()
             depsgraph.update()
             bm.from_object(mo, depsgraph)
-            verts.extend([correctionMatrix @ mo.matrix_world @ v.co.to_4d()
-                for v in bm.verts])
+            # Only add vertices that have valid coordinates
+            for v in bm.verts:
+                if not v.is_wire and v.link_loops:  # Skip wire vertices
+                    verts.append(correctionMatrix @ mo.matrix_world @ v.co.to_4d())
             bm.free()
-        minX = min([co[0] for co in verts])
-        minY = min([co[1] for co in verts])
-        minZ = min([co[2] for co in verts])
-        maxX = max([co[0] for co in verts])
-        maxY = max([co[1] for co in verts])
-        maxZ = max([co[2] for co in verts])
+        
+        # Handle case where no valid vertices exist
+        if not verts:
+            print(f"Warning: No valid vertices found for frame {frame}, using default bounds")
+            minX = minY = minZ = -1.0
+            maxX = maxY = maxZ = 1.0
+        else:
+            minX = min([co[0] for co in verts])
+            minY = min([co[1] for co in verts])
+            minZ = min([co[2] for co in verts])
+            maxX = max([co[0] for co in verts])
+            maxY = max([co[1] for co in verts])
+            maxZ = max([co[2] for co in verts])
         bounds.append(\
         "  ( {:.10f} {:.10f} {:.10f} ) ( {:.10f} {:.10f} {:.10f} )\n".\
         format(minX, minY, minZ, maxX, maxY, maxZ))
